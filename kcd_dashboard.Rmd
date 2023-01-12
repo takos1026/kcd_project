@@ -1,0 +1,265 @@
+---
+title: "Employment Insurance Monitor with KCD data"
+output: 
+  flexdashboard::flex_dashboard:
+    theme:
+      version: 4
+      bootswatch: flatly
+      base_font:
+        google: Prompt
+      code_font:
+        google: JetBrains Mono
+    orientation: columns
+    vertical_layout: fill
+---
+
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(vroom)
+library(dplyr)
+library(reactable)
+library(sparkline)
+library(highcharter)
+# Install thematic and un-comment for themed static plots (i.e., ggplot2)
+# thematic::thematic_rmd()
+
+data <- vroom("data/sample_data.csv")
+data <- data %>% filter(!is.na(classification__kcd_v2__depth_1_code) & !is.na(location__common__sido) & recent_m3_sales_amount >= 0 & yearly_sales_amount >= 0)
+
+margin_rate <- 0.12
+
+data2 <- 
+  data %>% 
+  select("index", 
+         starts_with("classification__kcd_v2__depth"), 
+         starts_with("yearly_sales"), 
+         starts_with("location__common"),
+         "recent_m3_sales_amount",
+         "target_month_sales_amount",
+         "amount_per_count",
+         "avg_month_sales_amount",
+         "last_sales_month_at"
+         ) %>%
+  mutate("recent_m3_sales_amount" = ifelse(recent_m3_sales_amount == 0, 0.01, recent_m3_sales_amount)) %>%
+  mutate("location__common_sido_gu" = paste0(location__common__sido, " ", location__common__sigungu), 
+         "assumed_net_income" = avg_month_sales_amount * margin_rate) %>% # 월평균 순수익 추정
+  mutate("classification_assummed_net_income" = assumed_net_income %/% 1000000) %>% # 순이익 그룹
+  mutate("is_under_minimum_income" = ifelse(classification_assummed_net_income <= 2, 1, 0)) %>%
+  mutate("avg_recent_3m_net_income" = recent_m3_sales_amount/3 * 0.12) %>% 
+  mutate("is_under_100_net_income" = ifelse(yearly_sales_amount > 0 & avg_recent_3m_net_income < 1000000, 1, 0)) %>% # 연내 매출이 있으나, 최근 3개월 간 월평균 순이익이 100만원 이하
+  mutate("is_none_sales_amount" = ifelse(yearly_sales_amount > 0 & (recent_m3_sales_amount == 0.01 | target_month_sales_amount == 0), 1, 0)) %>%
+  mutate("ratio_target_month_sales_per_recent3m" = round(target_month_sales_amount/recent_m3_sales_amount * 100))
+
+
+data4 <- data2 %>% filter(yearly_sales_count > 10) %>% 
+  group_by(location__common__sido, location__common__sigungu, classification__kcd_v2__depth_1_code, classification__kcd_v2__depth_1_name, classification__kcd_v2__depth_2_name, classification__kcd_v2__depth_3_name) %>%
+  summarise(n = n(),
+            median_assumed_net_income = (median(assumed_net_income) %/% 1000) * 1000,
+            avg_month_sales_amount = list(avg_month_sales_amount)) %>%
+  filter(n > 10) %>%
+  mutate("평균매출분포" = NA)
+
+
+
+data5 <- data2 %>% group_by(location__common__sido, classification__kcd_v2__depth_1_name) %>% 
+  summarise(n = n(),
+            sum_is_under_100_net_income = sum(is_under_100_net_income),
+            sum_is_none_sales_amount = sum(is_none_sales_amount)) %>%
+  mutate(rate_under_100_net_income = round(sum_is_under_100_net_income/n * 100),
+         rate_none_sales_amount = round(sum_is_none_sales_amount/n * 100))
+
+```
+
+
+업종별 매출
+===================================== 
+
+Row {data-width=150}
+-----------------------------------------------------------------------
+
+### 자료설명
+
+ - 자영업자 고용보험 적정 실업금여 기준 선택 시 활용 가능한 매출 분포 및 순이익 추정치
+ - 사업자 수(n) 10개 이상인 지역/업종만 산정하여 제시
+ - 평균매출분포는 박스가 넓을수록 사업체 간 매출 차이가 큰것을 의미함
+
+
+Column {data-width=650 .tabset}
+-----------------------------------------------------------------------
+
+### 외식업
+
+```{r}
+
+cls_d <- data4 %>% filter(classification__kcd_v2__depth_1_code == "D")
+
+reactable(cls_d %>% as_tibble %>% select(!c(avg_month_sales_amount, classification__kcd_v2__depth_1_code, classification__kcd_v2__depth_1_name)), 
+          columns = list(
+            location__common__sido = colDef(
+              name = "시(도)"
+            ),
+            location__common__sigungu = colDef(
+              name = "시,군,구"
+            ),
+            n = colDef(
+              name = "집계 사업자수"
+            ),
+            classification__kcd_v2__depth_2_name = colDef(
+              name = "세부업종1"
+            ),
+            classification__kcd_v2__depth_3_name = colDef(
+              name = "세부업종2"
+            ),
+            median_assumed_net_income = colDef(
+              name = "평균 순이익 추정치",
+              format = colFormat(currency = "KRW", separators = TRUE)
+            ),
+            `평균매출분포` = colDef(
+              cell = function(values, index) {
+                sparkline(cls_d$avg_month_sales_amount[[index]], type="box")
+              }
+            )
+          ),
+          filterable = TRUE, minRows = 10)
+
+```
+
+> 순이익 추정은 영업이익률 12%를 기준으로 함(2020년도 경제총조사 참고).
+
+
+### 유통업
+
+```{r}
+
+cls_a <- data4 %>% filter(classification__kcd_v2__depth_1_code == "A")
+
+reactable(cls_a %>% as_tibble %>% select(!c(avg_month_sales_amount, classification__kcd_v2__depth_1_code, classification__kcd_v2__depth_1_name)), 
+          columns = list(
+            location__common__sido = colDef(
+              name = "시(도)"
+            ),
+            location__common__sigungu = colDef(
+              name = "시,군,구"
+            ),
+            n = colDef(
+              name = "집계 사업자수"
+            ),
+            classification__kcd_v2__depth_2_name = colDef(
+              name = "세부업종1"
+            ),
+            classification__kcd_v2__depth_3_name = colDef(
+              name = "세부업종2"
+            ),
+            median_assumed_net_income = colDef(
+              name = "평균 순이익 추정치",
+              format = colFormat(currency = "KRW", separators = TRUE)
+            ),
+            `평균매출분포` = colDef(
+              cell = function(values, index) {
+                sparkline(cls_a$avg_month_sales_amount[[index]], type="box")
+              }
+            )
+          ),
+          filterable = TRUE, minRows = 10)
+
+
+```
+
+> 순이익 추정은 영업이익률 12%를 기준으로 함(2020년도 경제총조사 참고).
+
+### 서비스업
+
+```{r}
+cls_b <- data4 %>% filter(classification__kcd_v2__depth_1_code == "B")
+
+reactable(cls_b %>% as_tibble %>% select(!c(avg_month_sales_amount, classification__kcd_v2__depth_1_code, classification__kcd_v2__depth_1_name)), 
+          columns = list(
+            location__common__sido = colDef(
+              name = "시(도)"
+            ),
+            location__common__sigungu = colDef(
+              name = "시,군,구"
+            ),
+            classification__kcd_v2__depth_2_name = colDef(
+              name = "세부업종1"
+            ),
+            classification__kcd_v2__depth_3_name = colDef(
+              name = "세부업종2"
+            ),
+            n = colDef(
+              name = "집계 사업자수"
+            ),
+            median_assumed_net_income = colDef(
+              name = "평균 순이익 추정치",
+              format = colFormat(currency = "KRW", separators = TRUE)
+            ),
+            `평균매출분포` = colDef(
+              cell = function(values, index) {
+                sparkline(cls_b$avg_month_sales_amount[[index]], type="box")
+              }
+            )
+          ),
+          filterable = TRUE, minRows = 10)
+```
+
+> 순이익 추정은 영업이익률 12%를 기준으로 함(2020년도 경제총조사 참고).
+
+
+지역별 분석
+===================================== 
+
+
+
+Column {data-width=300}
+-----------------------------------------------------------------------
+
+### 당월 매출 미발생 사업체 비율
+```{r}
+
+gauge1 <- data2 %>% filter(target_month_sales_amount == 0) %>% nrow()
+gauge1 <- (gauge1/nrow(data2)) * 100
+
+gauge(gauge1, min = 0, max = 100, symbol = '%', gaugeSectors(
+  danger = c(80, 100), warning = c(40, 79), success = c(0, 39)
+))
+```
+
+
+### 당월 매출 하락 심각 사업체 비율
+```{r}
+
+gauge2 <- data2 %>% mutate(sum_ratio = ifelse(ratio_target_month_sales_per_recent3m < 20, 1, 0)) %>% filter(sum_ratio == 1) %>% nrow()
+gauge2 <- (gauge2/nrow(data2)) * 100
+
+gauge(gauge2, min = 0, max = 100, symbol = '%', gaugeSectors(
+  danger = c(80, 100), warning = c(40, 79), success = c(0, 39)
+))
+```
+
+
+Column {data-width=900}
+-----------------------------------------------------------------------
+
+
+### 최근 3개월 월평균 순이익(추정) 100만원 이하 사업체 비율
+
+```{r}
+
+data5 %>% hchart("column", hcaes(x = "location__common__sido", y = "rate_under_100_net_income", group= "classification__kcd_v2__depth_1_name")) %>%
+  hc_xAxis(title=list(text="지역")) %>%
+  hc_yAxis(title=list(text="비율(%)"))
+
+```
+
+### 최근 3개월 또는 당월 매출 미발생 사업체 비율
+
+```{r}
+data5 %>% hchart("column", hcaes(x = "location__common__sido", y = "rate_none_sales_amount", group= "classification__kcd_v2__depth_1_name")) %>%
+  hc_xAxis(title=list(text="지역")) %>%
+  hc_yAxis(title=list(text="비율(%)"))
+
+```
+
+
+
